@@ -3,6 +3,7 @@ import { xsd } from '../ontology/ns.js'
 import { version } from '../common/release.js'
 import { compact, blank, URI, get, pick } from '../common/util.js'
 import { serialize } from '../editor/serialize.js'
+import { getListPath } from './lists.js'
 
 const RESERVED = Object.fromEntries(properties.all.map(prop => ([prop, true])))
 
@@ -33,7 +34,7 @@ const exportItem = (context, item, state) => {
 
   if (item.lists.length > 0) {
     output.list = item.lists
-      .map(id => get(state, ['lists', id, 'name']))
+      .map(id => getListPath(state, { id }))
       .filter(x => !blank(x))
   }
 

@@ -27,6 +27,7 @@ import {
   getPhotoTemplate,
   getSelectionTemplate
 } from '../../selectors/index.js'
+import { importPaths as importLists } from '../list/import.js'
 
 const { readFile } = fs.promises
 
@@ -38,6 +39,7 @@ export class Import extends ImportCommand {
     // undo after cancelled (partial) import!
     this.result = []
     this.backlog = []
+    this.newLists = []
 
     yield * this.configure()
 
@@ -100,7 +102,8 @@ export class Import extends ImportCommand {
         photo: getPhotoTemplate(state),
         selection: getSelectionTemplate(state)
       },
-      useLocalTimezone: state.settings.timezone
+      useLocalTimezone: state.settings.timezone,
+      createLists: state.settings.createLists,
     })))
   }
 
@@ -113,7 +116,7 @@ export class Import extends ImportCommand {
         basePath, store, density, db, templates, useLocalTimezone
       } = this.options
 
-      let { list } = this.action.payload
+      let { list: activeList } = this.action.payload
       let item
       let photos = []
 
@@ -139,9 +142,9 @@ export class Import extends ImportCommand {
               data: data.photo
             })
 
-          if (list) {
-            await mod.list.items.add(tx, list, [item.id])
-            item.lists.push(list)
+          if (activeList) {
+            await mod.list.items.add(tx, activeList, [item.id])
+            item.lists.push(activeList)
           }
 
           item.photos.push(photo.id)
@@ -193,20 +196,25 @@ export class Import extends ImportCommand {
 
   *importJSONItem(obj, rel) {
     try {
-      let { db, basePath, templates } = this.options
-      let { list } = this.action.payload
+      let { db, basePath, templates, createLists } = this.options
+      let { list: activeList } = this.action.payload
       let item
       let photos = []
       let selections = []
       let notes = []
       let transcriptions = []
       let tags
+      let newLists = []
 
       yield this.progress()
 
       if (obj.tags.length) {
         tags = yield * this.findOrCreateTags(obj.tags)
       }
+
+      let lists = createLists
+        ? { ...(yield select(state => state.lists)) }
+        : null
 
       yield call(db.transaction, async tx => {
         item = await mod.item.create(
@@ -221,9 +229,18 @@ export class Import extends ImportCommand {
           item.tags = [...tags]
         }
 
-        if (list) {
-          await mod.list.items.add(tx, list, [item.id])
-          item.lists.push(list)
+        if (lists) {
+          let leafIds = await importLists(
+            tx, obj.lists, lists, newLists)
+          for (let listId of leafIds) {
+            await mod.list.items.add(tx, listId, [item.id])
+            item.lists.push(listId)
+          }
+        }
+
+        if (activeList && !item.lists.includes(activeList)) {
+          await mod.list.items.add(tx, activeList, [item.id])
+          item.lists.push(activeList)
         }
 
         for (let i = 0; i < obj.photos.length; ++i) {
@@ -276,8 +293,11 @@ export class Import extends ImportCommand {
       })
 
       this.result.push(item.id)
+      this.newLists.push(...newLists)
 
       yield all([
+        ...newLists.map(({ list, idx }) =>
+          put(act.list.insert(list, { idx }))),
         put(act.note.insert(notes)),
         put(act.transcriptions.insert(transcriptions)),
         put(act.selection.insert(selections)),
@@ -318,14 +338,14 @@ export class Import extends ImportCommand {
   }
 
   get redo() {
-    return (this.result && this.result.length > 0) ?
-        act.item.restore(this.result) :
+    return (this.result?.length > 0) ?
+        act.item.restore(this.result, { lists: this.newLists }) :
       null
   }
 
   get undo() {
-    return (this.result && this.result.length > 0) ?
-        act.item.delete(this.result) :
+    return (this.result?.length > 0) ?
+        act.item.delete(this.result, { lists: this.newLists }) :
       null
   }
 }
@@ -363,3 +383,4 @@ const importTranscriptions =
     }
     return result
   }
+
